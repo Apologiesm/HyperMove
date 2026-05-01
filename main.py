@@ -1,8 +1,10 @@
 """
-HyperMove v10.0 - Complete Restoration Edition
+HyperMove v10.1 - Perfected Restoration Edition
 The ultimate zero-compromise file transfer engine.
-RESTORED: Full code readability (no more 1-line minification).
-RESTORED: Data Verification, CSV Logging, Mac Direct I/O, and Global Hotkeys.
+FIXED: Fully expanded code (zero semicolons/minification).
+FIXED: Minimize, Maximize, and Close buttons are 100% functional.
+REMOVED: Unnecessary bubble/particle animations.
+RESTORED: All core functionality, verification, and logging.
 """
 
 import sys
@@ -19,10 +21,9 @@ from enum import Enum
 from pathlib import Path
 from queue import Queue
 from threading import Lock
-import random
 
 # =====================================================================
-# Optional Global Hotkey Support (Restored from v1.0)
+# Optional Global Hotkey Support
 # =====================================================================
 try:
     from pynput import keyboard
@@ -111,20 +112,24 @@ class EngineState(Enum):
     PAUSED = 2
     RESUMING = 3
     STOPPING = 4
-    VERIFYING = 5  # Restored Verification State
+    VERIFYING = 5 
 
 CHUNK_SIZE = 1024 * 1024  
-VERIFY_CHUNK_SIZE = 64 * 1024  # Restored from v1.0
+VERIFY_CHUNK_SIZE = 64 * 1024  
 DIRECT_CHUNK_SIZE = 1024 * 1024 * 8  
 
 class DirectIOWrapper:
     def __init__(self, path, mode='r'):
         self.path = path
         self.mode = mode
-    def read(self, size): raise NotImplementedError
-    def write(self, data): raise NotImplementedError
-    def seek(self, offset): raise NotImplementedError
-    def close(self): raise NotImplementedError
+    def read(self, size): 
+        raise NotImplementedError
+    def write(self, data): 
+        raise NotImplementedError
+    def seek(self, offset): 
+        raise NotImplementedError
+    def close(self): 
+        raise NotImplementedError
 
 class PosixDirectIO(DirectIOWrapper):
     def __init__(self, path, mode='r'):
@@ -151,7 +156,6 @@ class PosixDirectIO(DirectIOWrapper):
             self.fd = None
 
 class MacDirectIO(DirectIOWrapper):
-    """ Restored from original v1.0 """
     def __init__(self, path, mode='r'):
         super().__init__(path, mode)
         import fcntl
@@ -312,7 +316,6 @@ class CopyEngine(QThread):
         self.conflict_policy = ConflictPolicy.SMART_RESUME
         self.threads = 16
         
-        # Restored Features
         self.verify_data = False
         self.log_to_csv = False
         self.csv_path = ""
@@ -388,6 +391,7 @@ class CopyEngine(QThread):
                     self.skipped_files.append(sf)
                     self.transferred_bytes += sz
                     continue
+                
                 if self.conflict_policy == ConflictPolicy.SMART_RESUME:
                     if dsz < sz and dsz > 0: 
                         self.file_offsets[str(sf)] = dsz
@@ -410,14 +414,21 @@ class CopyEngine(QThread):
             self.signals.log_msg.emit(f"<span style='color:#FFBD2E;'>Power-Cut Recovery: Resuming {res} files...</span>")
             
         if self.mode == TransferMode.AUTO: 
-            self.mode = TransferMode.DIRECT if (len(self.files_to_process) == 1 and self.total_bytes > 1024**3) else TransferMode.PARALLEL
+            if len(self.files_to_process) == 1 and self.total_bytes > 1024**3:
+                self.mode = TransferMode.DIRECT 
+            else: 
+                self.mode = TransferMode.PARALLEL
 
         if self.mode == TransferMode.DIRECT and unaligned_resume_detected:
             self.mode = TransferMode.PARALLEL
             self.signals.log_msg.emit("<span style='color:#FFBD2E;'>Alignment mismatch detected. Using safe Parallel Mode.</span>")
 
     def run(self):
-        self.set_state(EngineState.COPYING if self.state != EngineState.RESUMING else EngineState.COPYING)
+        if self.state != EngineState.RESUMING:
+            self.set_state(EngineState.COPYING)
+        else:
+            self.set_state(EngineState.COPYING)
+            
         self.last_update_time = time.time()
         self.last_transferred = self.transferred_bytes
         self.pool.setMaxThreadCount(self.threads if self.mode == TransferMode.PARALLEL else 1)
@@ -438,7 +449,6 @@ class CopyEngine(QThread):
         if self.state == EngineState.PAUSED: 
             return
 
-        # Restored Data Integrity Verification
         if self.verify_data and not self.failed_files:
             self.set_state(EngineState.VERIFYING)
             self.signals.log_msg.emit("<span style='color:#00F3FF;'>Verifying data integrity...</span>")
@@ -457,10 +467,14 @@ class CopyEngine(QThread):
                 if self.src_path.is_dir():
                     for root, dirs, files in os.walk(self.src_path, topdown=False):
                         for name in dirs:
-                            try: os.rmdir(os.path.join(root, name))
-                            except: pass
-                    try: os.rmdir(self.src_path)
-                    except: pass
+                            try: 
+                                os.rmdir(os.path.join(root, name))
+                            except: 
+                                pass
+                    try: 
+                        os.rmdir(self.src_path)
+                    except: 
+                        pass
                 self.signals.log_msg.emit("Source files successfully wiped.")
             except Exception as e: 
                 self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Cleanup Error: {e}</span>")
@@ -522,7 +536,6 @@ class CopyEngine(QThread):
                 self._on_worker_finished(str(src), str(dst), False, str(e))
 
     def _verify_files(self):
-        """ Restored from original v1.0 """
         for src, dst in self.files_to_process:
             if self.state == EngineState.STOPPING: 
                 return False
@@ -559,6 +572,7 @@ class CopyEngine(QThread):
     def _on_worker_progress(self, b):
         with self.worker_lock: 
             self.transferred_bytes += b
+            
         cur = time.time()
         elap = cur - self.last_update_time
         
@@ -595,7 +609,6 @@ class CopyEngine(QThread):
                 self.failed_files.append(s)
                 self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Error: {err}</span>")
             
-            # Restored CSV Logging
             if self.log_to_csv and self.csv_path:
                 try:
                     with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
@@ -606,7 +619,7 @@ class CopyEngine(QThread):
                     pass
 
 # =====================================================================
-# UI Components: Interactive Liquid Graph
+# UI Components: Clean Liquid Graph (No Bubbles)
 # =====================================================================
 
 class LiquidSpeedGraph(QWidget):
@@ -618,7 +631,7 @@ class LiquidSpeedGraph(QWidget):
         self.phase = 0.0
         self.accent = QColor(0, 243, 255)
         
-        self.particles = [{"x": random.randint(0, 800), "y": random.randint(0, 80), "s": random.uniform(1, 4)} for _ in range(15)]
+        # Bubbles/Particles completely removed based on user request.
         
         self.wave_anim = QVariantAnimation()
         self.wave_anim.setDuration(4000)
@@ -633,11 +646,6 @@ class LiquidSpeedGraph(QWidget):
 
     def _tick(self, val):
         self.phase = val
-        for p in self.particles:
-            p["x"] += p["s"] * (1 + (self.points[-1] / (1024*1024*100))) 
-            if p["x"] > self.width(): 
-                p["x"] = -10
-                p["y"] = random.randint(10, 70)
         self.update()
 
     def update_data(self, val): 
@@ -656,11 +664,6 @@ class LiquidSpeedGraph(QWidget):
         h = self.height()
         step = w / (len(self.points) - 1)
         
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(self.accent.red(), self.accent.green(), self.accent.blue(), 60))
-        for p in self.particles: 
-            painter.drawEllipse(QPointF(p["x"], p["y"]), 1.5, 1.5)
-
         def get_path(off, amp):
             path = QPainterPath()
             path.moveTo(0, h)
@@ -683,6 +686,7 @@ class LiquidSpeedGraph(QWidget):
         grad.setColorAt(1, Qt.GlobalColor.transparent)
         
         painter.setBrush(grad)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(get_path(1.0, 6))
         
         painter.setPen(QPen(self.accent, 2))
@@ -820,7 +824,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.resize(920, 780) # Made slightly taller to fit restored checkboxes
+        self.resize(920, 780) 
         
         logo = resource_path("logo.ico")
         if os.path.exists(logo): 
@@ -839,7 +843,7 @@ class MainWindow(QMainWindow):
         self.dst = ""
         self.op = OperationType.COPY
         self.init_ui()
-        self.setup_global_hotkey() # Restored from v1.0
+        self.setup_global_hotkey()
         
         QTimer.singleShot(100, lambda: apply_native_window_blur(self.winId()))
 
@@ -852,20 +856,38 @@ class MainWindow(QMainWindow):
         main = QVBoxLayout(self.cw)
         main.setContentsMargins(0,0,0,0)
         
-        # Title Bar
+        # -------------------------------------------------------------
+        # RESTORED: Fully Functional Custom Title Bar with Minimize/Maximize
+        # -------------------------------------------------------------
         tb = QWidget()
         tb.setFixedHeight(45)
         tbl = QHBoxLayout(tb)
         tbl.setContentsMargins(15,0,15,0)
         
-        for c in ["#FF5F56", "#FFBD2E", "#27C93F"]:
-            d = QPushButton()
-            d.setFixedSize(12,12)
-            d.setStyleSheet(f"background: {c}; border-radius: 6px; border: none;")
-            tbl.addWidget(d)
+        self.btn_close = QPushButton()
+        self.btn_close.setFixedSize(12, 12)
+        self.btn_close.setStyleSheet("background: #FF5F56; border-radius: 6px; border: none;")
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.clicked.connect(self.close)
+
+        self.btn_min = QPushButton()
+        self.btn_min.setFixedSize(12, 12)
+        self.btn_min.setStyleSheet("background: #FFBD2E; border-radius: 6px; border: none;")
+        self.btn_min.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_min.clicked.connect(self.showMinimized)
+
+        self.btn_max = QPushButton()
+        self.btn_max.setFixedSize(12, 12)
+        self.btn_max.setStyleSheet("background: #27C93F; border-radius: 6px; border: none;")
+        self.btn_max.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_max.clicked.connect(self.toggle_maximize)
+
+        tbl.addWidget(self.btn_close)
+        tbl.addWidget(self.btn_min)
+        tbl.addWidget(self.btn_max)
             
         tbl.addSpacing(15)
-        self.lblt = QLabel("HyperMove Pro - Complete Restoration")
+        self.lblt = QLabel("HyperMove Pro - Perfected Edition")
         self.lblt.setStyleSheet("font-weight: bold; opacity: 0.6; font-size: 11px;")
         tbl.addWidget(self.lblt)
         tbl.addStretch()
@@ -1022,6 +1044,14 @@ class MainWindow(QMainWindow):
         self.btn_pause.clicked.connect(lambda: self.engine.set_state(EngineState.PAUSED))
         self.btn_resume.clicked.connect(lambda: [self.engine.set_state(EngineState.RESUMING), self.engine.start()])
         self.btn_stop.clicked.connect(self.stop_transfer)
+
+    @Slot()
+    def toggle_maximize(self):
+        """ Restored Maximize / Restore Functionality """
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     # Restored from v1.0 - Global Hotkey
     def setup_global_hotkey(self):
