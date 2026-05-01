@@ -1,7 +1,7 @@
 """
-HyperMove v8.1 - Liquid & Resilient Edition
+HyperMove v8.2 - Liquid & Resilient Edition
 The ultimate zero-compromise file transfer engine.
-FIXED: Lag-free native window dragging.
+UPDATED: Advanced Conflict Handling & Move-Safety Guards.
 """
 
 import sys
@@ -22,7 +22,6 @@ from threading import Lock
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for compiled EXE """
     try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
@@ -75,6 +74,11 @@ class TransferMode(Enum):
     PARALLEL = "Parallel (Safest/Stable)"
     DIRECT = "Direct I/O (Extreme Speed)"
 
+class ConflictPolicy(Enum):
+    SMART_RESUME = "Smart Resume (Fastest)"
+    OVERWRITE = "Overwrite (Replace All)"
+    SKIP = "Skip Existing"
+
 class OperationType(Enum):
     COPY = "Copy"
     MOVE = "Move"
@@ -114,6 +118,7 @@ class WindowsDirectIO(DirectIOWrapper):
     def __init__(self, path, mode='r'):
         super().__init__(path, mode)
         self.kernel32 = ctypes.windll.kernel32
+        # 4 = OPEN_ALWAYS, 2 = CREATE_ALWAYS
         creation_disposition = 3 if mode == 'r' else (4 if mode == 'a' else 2) 
         self.handle = self.kernel32.CreateFileW(
             str(path), 0x80000000 if mode == 'r' else 0x40000000, 1 | 2,
@@ -169,7 +174,9 @@ class ParallelWorker(QRunnable):
                 if self.engine.state == EngineState.PAUSED: self.engine.save_offset(self.src, self.offset)
                 return
             sync_counter = 0
-            with open(self.src, 'rb') as fsrc, open(self.dst, 'ab' if self.offset > 0 else 'wb') as fdst:
+            # 'wb' for fresh, 'ab' for resume
+            mode = 'ab' if self.offset > 0 else 'wb'
+            with open(self.src, 'rb') as fsrc, open(self.dst, mode) as fdst:
                 if self.offset > 0: fsrc.seek(self.offset)
                 while True:
                     if self.engine.state in [EngineState.STOPPING, EngineState.PAUSED]:
@@ -207,9 +214,11 @@ class CopyEngine(QThread):
         self.src_path, self.dst_path = "", ""
         self.mode = TransferMode.AUTO
         self.operation = OperationType.COPY
+        self.conflict_policy = ConflictPolicy.SMART_RESUME
         self.threads = 16
         self.total_bytes, self.transferred_bytes = 0, 0
         self.files_to_process, self.file_offsets, self.failed_files = [], {}, []
+        self.skipped_files = [] # Files that won't be deleted from source
         self.active_destinations = set()
         self.pool = QThreadPool()
         self.worker_lock = Lock()
@@ -226,14 +235,15 @@ class CopyEngine(QThread):
     def save_offset(self, src_path, offset):
         with self.worker_lock: self.file_offsets[str(src_path)] = offset
 
-    def prepare_job(self, src, dst, mode, operation, threads):
+    def prepare_job(self, src, dst, mode, operation, conflict, threads):
         self.src_path, self.dst_path = Path(src), Path(dst)
-        self.mode, self.operation, self.threads = mode, operation, threads
+        self.mode, self.operation, self.conflict_policy, self.threads = mode, operation, conflict, threads
         self.total_bytes, self.transferred_bytes = 0, 0
         self.files_to_process.clear()
         self.file_offsets.clear()
         self.active_destinations.clear()
         self.failed_files.clear()
+        self.skipped_files.clear()
         self.speed_history.clear()
 
         temp_files = []
@@ -247,54 +257,91 @@ class CopyEngine(QThread):
                     dst_f = self.dst_path / self.src_path.name / src_f.relative_to(self.src_path)
                     temp_files.append((src_f, dst_f))
                     
-        resumed_files = 0
+        resumed_count = 0
         unaligned_resume_detected = False
+        
         for src_f, dst_f in temp_files:
-            self.files_to_process.append((src_f, dst_f))
             src_size = src_f.stat().st_size
             self.total_bytes += src_size
+            
             if dst_f.exists():
                 dst_size = dst_f.stat().st_size
-                if dst_size < src_size and dst_size > 0:
-                    self.file_offsets[str(src_f)] = dst_size
-                    self.transferred_bytes += dst_size
-                    resumed_files += 1
-                    if dst_size % 4096 != 0: unaligned_resume_detected = True
-                elif dst_size == src_size:
-                    self.file_offsets[str(src_f)] = dst_size
-                    self.transferred_bytes += dst_size
+                
+                if self.conflict_policy == ConflictPolicy.SKIP:
+                    self.skipped_files.append(src_f)
+                    self.transferred_bytes += src_size
+                    continue
+                
+                if self.conflict_policy == ConflictPolicy.SMART_RESUME:
+                    if dst_size < src_size and dst_size > 0:
+                        self.file_offsets[str(src_f)] = dst_size
+                        self.transferred_bytes += dst_size
+                        resumed_count += 1
+                        if dst_size % 4096 != 0: unaligned_resume_detected = True
+                        self.files_to_process.append((src_f, dst_f))
+                    elif dst_size == src_size:
+                        # Assuming done, but adding to skip list so we don't delete source if it's potentially different
+                        self.skipped_files.append(src_f)
+                        self.transferred_bytes += src_size
+                    else:
+                        # Destination is larger? Possible corruption. Treat as fresh copy.
+                        self.files_to_process.append((src_f, dst_f))
+                else: # OVERWRITE
+                    self.files_to_process.append((src_f, dst_f))
+            else:
+                self.files_to_process.append((src_f, dst_f))
                     
-        if resumed_files > 0:
-            self.signals.log_msg.emit(f"<span style='color:#FFBD2E;'>Power-Cut Recovery: Auto-resuming {resumed_files} files.</span>")
+        if resumed_count > 0:
+            self.signals.log_msg.emit(f"<span style='color:#FFBD2E;'>Resuming {resumed_count} partial files.</span>")
+        if len(self.skipped_files) > 0:
+            self.signals.log_msg.emit(f"<span style='color:#00F3FF;'>Skipping {len(self.skipped_files)} existing files.</span>")
 
         if self.mode == TransferMode.AUTO:
             self.mode = TransferMode.DIRECT if (len(self.files_to_process) == 1 and self.total_bytes > 1024**3) else TransferMode.PARALLEL
 
         if self.mode == TransferMode.DIRECT and unaligned_resume_detected:
             self.mode = TransferMode.PARALLEL
-            self.signals.log_msg.emit("<span style='color:#FFBD2E;'>Unaligned boundary. Using Parallel Mode for safe resume.</span>")
+            self.signals.log_msg.emit("<span style='color:#FFBD2E;'>Unaligned boundary. Falling back to Parallel Mode for safety.</span>")
 
     def run(self):
         self.set_state(EngineState.COPYING if self.state != EngineState.RESUMING else EngineState.COPYING)
         self.last_update_time, self.last_transferred = time.time(), self.transferred_bytes
         self.pool.setMaxThreadCount(self.threads if self.mode == TransferMode.PARALLEL else 1)
+        
         if self.mode == TransferMode.PARALLEL: self._run_parallel()
         else: self._run_direct()
+        
         self.pool.waitForDone()
+        
         if self.state == EngineState.STOPPING:
             self._cleanup_partials()
             self.set_state(EngineState.IDLE)
             self.signals.job_finished.emit()
             return
         if self.state == EngineState.PAUSED: return
+
+        # True MOVE Logic: Only delete files that were actually touched by this session
         if self.operation == OperationType.MOVE and not self.failed_files:
-            self.signals.log_msg.emit("Wiping source files for Move...")
+            self.signals.log_msg.emit("Finalizing move...")
             try:
-                if self.src_path.is_file(): self.src_path.unlink()
-                else: shutil.rmtree(self.src_path)
-                self.signals.log_msg.emit("Source successfully wiped.")
+                # We only delete files that were in files_to_process and finished.
+                # Files in skipped_files are NOT deleted to prevent data loss on drive C.
+                for src_f, dst_f in self.files_to_process:
+                    if src_f.exists(): src_f.unlink()
+                
+                # Try to remove empty folders
+                if self.src_path.is_dir():
+                    for root, dirs, files in os.walk(self.src_path, topdown=False):
+                        for name in dirs:
+                            try: os.rmdir(os.path.join(root, name))
+                            except: pass
+                    try: os.rmdir(self.src_path)
+                    except: pass
+                    
+                self.signals.log_msg.emit("Move completed safely.")
             except Exception as e:
-                self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Failed to delete source: {e}</span>")
+                self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Cleanup Error: {e}</span>")
+
         self.set_state(EngineState.IDLE)
         self.signals.job_finished.emit()
 
@@ -302,7 +349,6 @@ class CopyEngine(QThread):
         for src, dst in self.files_to_process:
             if self.state != EngineState.COPYING: break
             offset = self.file_offsets.get(str(src), 0)
-            if offset >= src.stat().st_size and src.stat().st_size > 0: continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             self.active_destinations.add(str(dst))
             worker = ParallelWorker(src, dst, self, offset)
@@ -314,8 +360,6 @@ class CopyEngine(QThread):
         for src, dst in self.files_to_process:
             if self.state != EngineState.COPYING: break
             offset = self.file_offsets.get(str(src), 0)
-            file_size = src.stat().st_size
-            if offset >= file_size and file_size > 0: continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             self.active_destinations.add(str(dst))
             try:
@@ -494,7 +538,6 @@ class MacTitleBar(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # FIX: Native lag-free dragging
             self.window().windowHandle().startSystemMove()
 
 class GlassCard(QFrame):
@@ -608,7 +651,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.resize(880, 600)
+        self.resize(880, 640)
         
         logo_path = resource_path("logo.ico")
         if os.path.exists(logo_path): self.setWindowIcon(QIcon(logo_path))
@@ -665,14 +708,26 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar(); self.progress_bar.setTextVisible(False); self.progress_bar.setFixedHeight(4); self.progress_bar.setStyleSheet("QProgressBar { background-color: rgba(255,255,255,0.05); border: none; } QProgressBar::chunk { background-color: #00F3FF; }")
         self.prog_anim = QPropertyAnimation(self.progress_bar, b"value"); self.prog_anim.setEasingCurve(QEasingCurve.Type.OutCubic); self.prog_anim.setDuration(400)
         dash_layout.addWidget(self.lbl_speed); dash_layout.addSpacing(15); dash_layout.addLayout(stats_layout); dash_layout.addSpacing(15); dash_layout.addWidget(self.graph); dash_layout.addWidget(self.progress_bar)
-        controls_card = GlassCard(); controls_layout = QVBoxLayout(controls_card); controls_layout.setContentsMargins(20, 20, 20, 20)
+        
+        controls_card = GlassCard(); controls_layout = QVBoxLayout(controls_card); controls_layout.setContentsMargins(20, 15, 20, 20)
         op_layout = QHBoxLayout()
-        self.btn_op_copy = QPushButton("COPY (Keep Original)"); self.btn_op_move = QPushButton("MOVE (Delete Original)")
+        self.btn_op_copy = QPushButton("COPY"); self.btn_op_move = QPushButton("MOVE")
         self.op_group = QButtonGroup(self); self.op_group.addButton(self.btn_op_copy, 0); self.op_group.addButton(self.btn_op_move, 1)
         for btn in [self.btn_op_copy, self.btn_op_move]:
             btn.setCheckable(True); btn.setFixedHeight(28); btn.setFont(QFont("SF Pro Text", 10, QFont.Weight.Bold)); btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setStyleSheet("QPushButton { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; } QPushButton:checked { background: rgba(0, 243, 255, 0.15); color: #00F3FF; border: 1px solid #00F3FF; }")
         self.btn_op_copy.setChecked(True); self.op_group.buttonClicked.connect(self.update_operation_mode); op_layout.addWidget(self.btn_op_copy); op_layout.addWidget(self.btn_op_move)
+        
+        # New Settings Area
+        settings_grid = QGridLayout()
+        lbl_conflict = QLabel("Conflict Handling:"); lbl_conflict.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 10px;")
+        self.conflict_combo = QComboBox(); self.conflict_combo.addItems([c.value for c in ConflictPolicy]); self.conflict_combo.setStyleSheet("QComboBox { background: rgba(0,0,0,0.2); color: white; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 5px; font-size: 10px; }")
+        settings_grid.addWidget(lbl_conflict, 0, 0); settings_grid.addWidget(self.conflict_combo, 0, 1)
+        
+        lbl_mode = QLabel("Hardware Profile:"); lbl_mode.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 10px;")
+        self.mode_combo = QComboBox(); self.mode_combo.addItems([m.value for m in TransferMode]); self.mode_combo.setStyleSheet("QComboBox { background: rgba(0,0,0,0.2); color: white; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 5px; font-size: 10px; }")
+        settings_grid.addWidget(lbl_mode, 1, 0); settings_grid.addWidget(self.mode_combo, 1, 1)
+
         btn_container = QWidget(); btn_container.setFixedHeight(45); btn_layout = QGridLayout(btn_container); btn_layout.setContentsMargins(0,0,0,0)
         self.btn_start = QPushButton("START COPY"); self.btn_start.setFont(QFont("SF Pro Text", 14, QFont.Weight.Bold)); self.btn_start.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_start.setStyleSheet("QPushButton { background-color: #00F3FF; color: black; border-radius: 10px; } QPushButton:hover { background-color: #00D0FF; }")
@@ -681,13 +736,12 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_start, 0, 0); btn_layout.addWidget(self.btn_open_dest, 0, 0)
         self.eff_start = QGraphicsOpacityEffect(self.btn_start); self.btn_start.setGraphicsEffect(self.eff_start)
         self.eff_open = QGraphicsOpacityEffect(self.btn_open_dest); self.eff_open.setOpacity(0.0); self.btn_open_dest.setGraphicsEffect(self.eff_open); self.btn_open_dest.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        
         control_action_layout = QHBoxLayout()
         self.btn_pause = self._make_sec_btn("Pause"); self.btn_resume = self._make_sec_btn("Resume"); self.btn_stop = self._make_sec_btn("Cancel", "#FF453A", "rgba(255,69,58,0.2)")
         for b in [self.btn_pause, self.btn_resume, self.btn_stop]: b.setEnabled(False); control_action_layout.addWidget(b)
-        mode_layout = QHBoxLayout(); lbl_mode = QLabel("Hardware Profile:"); lbl_mode.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
-        self.mode_combo = QComboBox(); self.mode_combo.addItems([m.value for m in TransferMode]); self.mode_combo.setStyleSheet("QComboBox { background: transparent; color: white; border: none; font-weight: bold; }")
-        mode_layout.addWidget(lbl_mode); mode_layout.addWidget(self.mode_combo); mode_layout.addStretch()
-        controls_layout.addLayout(op_layout); controls_layout.addSpacing(10); controls_layout.addWidget(btn_container); controls_layout.addSpacing(10); controls_layout.addLayout(control_action_layout); controls_layout.addSpacing(10); controls_layout.addLayout(mode_layout)
+
+        controls_layout.addLayout(op_layout); controls_layout.addSpacing(10); controls_layout.addLayout(settings_grid); controls_layout.addSpacing(15); controls_layout.addWidget(btn_container); controls_layout.addSpacing(10); controls_layout.addLayout(control_action_layout)
         right_panel.addWidget(dash_card); right_panel.addWidget(controls_card)
         content_layout.addLayout(left_panel, 45); content_layout.addLayout(right_panel, 55); main_layout.addLayout(content_layout)
         self.btn_start.clicked.connect(self.start_transfer); self.btn_open_dest.clicked.connect(self.open_destination); self.btn_pause.clicked.connect(lambda: self.engine.set_state(EngineState.PAUSED))
@@ -733,7 +787,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def on_job_finished(self):
-        if self.engine.state != EngineState.STOPPING: self.prog_anim.setEndValue(100); self.prog_anim.start(); self.lbl_speed.setText("Done"); self.log_message(f"<span style='color:#00F3FF;'>Operation {self.current_operation.name} finished.</span>"); self.crossfade_main_buttons(show_open=True)
+        if self.engine.state != EngineState.STOPPING: self.prog_anim.setEndValue(100); self.prog_anim.start(); self.lbl_speed.setText("Done"); self.log_message(f"<span style='color:#00F3FF;'>Operation {self.current_operation.name} finished flawlessly.</span>"); self.crossfade_main_buttons(show_open=True)
 
     def crossfade_main_buttons(self, show_open):
         self.main_btn_anim = QParallelAnimationGroup()
@@ -757,8 +811,13 @@ class MainWindow(QMainWindow):
     def start_transfer(self):
         if not self.src_path or not self.dst_path: return QMessageBox.warning(self, "Selection", "Select paths.")
         if os.path.abspath(self.src_path) == os.path.abspath(self.dst_path): return QMessageBox.warning(self, "Invalid", "Paths cannot match.")
+        
         mode = next(m for m in TransferMode if m.value == self.mode_combo.currentText())
-        self.progress_bar.setValue(0); self.engine.prepare_job(self.src_path, self.dst_path, mode, self.current_operation, 16); self.engine.start()
+        conflict = next(c for c in ConflictPolicy if c.value == self.conflict_combo.currentText())
+        
+        self.progress_bar.setValue(0)
+        self.engine.prepare_job(self.src_path, self.dst_path, mode, self.current_operation, conflict, 16)
+        self.engine.start()
 
     def stop_transfer(self):
         if QMessageBox.question(self, "Cancel", "Abort?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes: self.engine.set_state(EngineState.STOPPING)
