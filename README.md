@@ -47,7 +47,7 @@ You don't need to install any code to run this. It operates as a fully standalon
 If you want to run the raw Python code or compile the executable yourself:
 
 	# 1. Clone the repository
-	git clone [https://github.com/yourusername/HyperMove.git](https://github.com/yourusername/HyperMove.git)
+	git clone [https://github.com/Apologiesm/HyperMove.git]
 	
 	# 2. Navigate to the directory
 	cd HyperMove
