@@ -1,64 +1,67 @@
-📖 What is HyperMove?
+**📖 What is HyperMove?**
 
-HyperMove is a professional-grade graphical utility designed specifically for copying and moving massive amounts of data (like 150GB+ games, raw video files, and massive backups) at the absolute physical limit of your SSDs and HDDs.
+HyperMove Pro is an elite, graphical utility designed specifically for moving massive amounts of data—like 150GB+ games, 4K/8K raw video files, and heavy backups—at the absolute physical limit of your SSDs and HDDs.
 
-By utilizing advanced Direct I/O caching bypass and Hardware Syncing, HyperMove achieves transfer speeds that standard operating system copy windows simply cannot match, all while wrapped in a breathtaking, hardware-accelerated fluid UI.
+Standard operating systems copy files by loading them into your RAM first. For massive files, this fills your memory, slows down your PC, and creates points of failure. HyperMove bypasses the OS entirely using Direct I/O, piping data straight from drive to drive while wrapping the experience in a breathtaking, hardware-accelerated fluid UI.
 
 ✨ Key Features
 
-🚀 Direct I/O Engine: Bypasses the standard OS RAM cache to stream data directly from disk to disk, preventing system freezes during massive transfers.
+- 🚀 Direct I/O Hardware Bypass: Features a tuned 16MB chunk pipeline to saturate Gen4 and Gen5 NVMe bandwidth without touching your system's RAM cache.
 
-🛡️ Bulletproof Power-Cut Recovery: Features hardware fsync flushing. If your PC loses power at 90GB of a 150GB transfer, HyperMove will safely auto-resume byte-for-byte when you turn it back on.
++ 🛡️ Bulletproof Resumption: Built-in hardware `fsync` flushing. If you lose power during a massive transfer, HyperMove safely auto-resumes byte-for-byte.
 
-🌊 Liquid Telemetry Dashboard: Monitor your transfer with a stunning 60FPS fluid dual-wave speed graph that reacts to disk performance in real-time.
+- 🌊 Liquid Telemetry Dashboard: Monitor your exact transfer speeds in real-time with a lag-free, GPU-accelerated fluid wave graph.
 
-🗂️ True Move (Copy + Verify + Delete): Safely moves files by ensuring 100% data integrity before automatically wiping the source files to free up space.
+- 🔒 Data Integrity Verification: Optional deep-scan verification ensures that every single bit on your target drive perfectly matches the source.
 
-🎨 Native OS Glass UI: Features authentic background blur (Acrylic/Mica on Windows), smooth crossfading drop zones, and premium typography.
+- 📊 CSV Auditing: Automatically generate professional `.csv` log files for every transfer session.
 
-📥 How to Download & Install
+- 🎨 Native OS Glass UI: Features authentic background blur (Acrylic/Mica), spring-physics drop zones, and dynamic themes (Cyan for Copy, Magenta for Move).
 
-You don't need to install any code to run this. Simply download the standalone application!
+📥 How to Download & Run
 
-Go to the Releases page of this repository.
+You don't need to install any code to run this. It operates as a fully standalone portable executable.
 
-Download the latest HyperMove.exe file for Windows.
+1. Go to the [Releases page](https://github.com/Apologiesm/HyperMove/releases) of this repository.
 
-Double-click the .exe to launch the application instantly. No installation required!
+2. Download the latest `HyperMove.exe` file for Windows.
+
+3. Double-click the `.exe` to launch the application instantly. No installation required!
 
 🖥️ How to Use
 
-Launch the App: Open HyperMove.exe.
+1. Launch the App: Open `HyperMove.exe`.
 
-Select Source: Drag and drop your massive game folder or video files into the top Source drop zone, or click "Folder" to browse.
+2. Select Source: Drag and drop your massive game folder or video files into the top Source drop zone.
 
-Select Destination: Drag and drop your target NVMe/HDD into the bottom Destination drop zone.
+3. Select Destination: Drag and drop your target NVMe/HDD into the bottom Destination drop zone.
 
-Choose Operation: Select either Copy (keeps original files) or Move (deletes original files after a safe transfer).
+4. Configure: * Choose Copy (keeps original files) or Move (wipes original files safely after a verified transfer).
 
-Start: Click START, sit back, and watch the Liquid Telemetry Graph max out your drive speeds.
+- Set your Hardware Profile (Select Direct I/O for maximum NVMe speeds).
+
+5. Start: Click START ENGINE, sit back, and watch the Liquid Telemetry Graph max out your drive.
 
 🛠️ For Developers (Build from Source)
 
-If you want to run the raw Python code or compile the .exe yourself:
+If you want to run the raw Python code or compile the executable yourself:
 
-# 1. Clone the repository
-git clone [https://github.com/yourusername/HyperMove.git](https://github.com/yourusername/HyperMove.git)
+	# 1. Clone the repository
+	git clone [https://github.com/yourusername/HyperMove.git](https://github.com/yourusername/HyperMove.git)
+	
+	# 2. Navigate to the directory
+	cd HyperMove
+	
+	# 3. Install required dependencies
+	pip install PySide6 pyinstaller pynput
+	
+	# 4. Run the application directly
+	python main.py
+	
+	# 5. Build the standalone executable
+	pyinstaller --noconfirm --onefile --windowed --icon "logo.ico" --add-data "logo.ico;." --name "HyperMove" "main.py"
 
-# 2. Navigate to the directory
-cd HyperMove
 
-# 3. Install required dependencies
-pip install PySide6 pyinstaller
+🤝 Support & Feedback
 
-# 4. Run the application directly
-python main.py
-
-# 5. Build the standalone executable
-pyinstaller --noconfirm --onefile --windowed --icon "logo.ico" --add-data "logo.ico;." --name "HyperMove" "main.py"
-
-
-🤝 Contributing & Support
-
-If you love this tool and it saved you hours of transfer time, consider supporting the project!
-Found a bug or want to request a feature? Feel free to open an Issue or submit a Pull Request.
+If this tool saved you hours of waiting on Windows file transfers, consider sharing it! Found a bug or have a feature request? Feel free to open an Issue or submit a Pull Request.
