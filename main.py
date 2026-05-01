@@ -1,10 +1,8 @@
 """
-HyperMove v10.1 - Perfected Restoration Edition
+HyperMove v10.4 - NVMe Raw Speed Edition
 The ultimate zero-compromise file transfer engine.
-FIXED: Fully expanded code (zero semicolons/minification).
-FIXED: Minimize, Maximize, and Close buttons are 100% functional.
-REMOVED: Unnecessary bubble/particle animations.
-RESTORED: All core functionality, verification, and logging.
+UPDATED: Tuned Direct I/O chunk sizing to 16MB for maximum Gen4/Gen5 NVMe saturation.
+UPDATED: Clarified UI to reflect Raw Hardware Speed goals.
 """
 
 import sys
@@ -95,7 +93,7 @@ from PySide6.QtGui import (
 class TransferMode(Enum):
     AUTO = "Auto (Smart)"
     PARALLEL = "Parallel (Safest)"
-    DIRECT = "Direct I/O (Max Speed)"
+    DIRECT = "Direct I/O (Raw NVMe/HDD Speed)"
 
 class ConflictPolicy(Enum):
     SMART_RESUME = "Smart Resume"
@@ -116,7 +114,8 @@ class EngineState(Enum):
 
 CHUNK_SIZE = 1024 * 1024  
 VERIFY_CHUNK_SIZE = 64 * 1024  
-DIRECT_CHUNK_SIZE = 1024 * 1024 * 8  
+# 16MB Chunk size optimally saturates Gen4/Gen5 NVMe bandwidth during Direct I/O
+DIRECT_CHUNK_SIZE = 1024 * 1024 * 16  
 
 class DirectIOWrapper:
     def __init__(self, path, mode='r'):
@@ -185,6 +184,8 @@ class WindowsDirectIO(DirectIOWrapper):
         super().__init__(path, mode)
         self.kernel32 = ctypes.windll.kernel32
         creation = 3 if mode == 'r' else (4 if mode == 'a' else 2) 
+        
+        # 0x20000000 = FILE_FLAG_NO_BUFFERING (Direct I/O Hardware Bypass)
         self.handle = self.kernel32.CreateFileW(
             str(path), 
             0x80000000 if mode == 'r' else 0x40000000, 
@@ -204,7 +205,7 @@ class WindowsDirectIO(DirectIOWrapper):
         success = self.kernel32.ReadFile(self.handle, self.buffer, min(size, self.buf_size), ctypes.byref(bytes_read), None)
         if not success and bytes_read.value == 0:
             err = self.kernel32.GetLastError()
-            if err != 38: 
+            if err != 38: # ERROR_HANDLE_EOF
                 raise ctypes.WinError(err)
             return b""
         return ctypes.string_at(self.buffer, bytes_read.value)
@@ -283,6 +284,7 @@ class ParallelWorker(QRunnable):
                     self.offset += len(chunk)
                     self.signals.progress.emit(len(chunk))
                     
+                    # Hardware safety flush every 50MB
                     sync_counter += len(chunk)
                     if sync_counter > 50 * 1024 * 1024: 
                         fdst.flush()
@@ -467,14 +469,10 @@ class CopyEngine(QThread):
                 if self.src_path.is_dir():
                     for root, dirs, files in os.walk(self.src_path, topdown=False):
                         for name in dirs:
-                            try: 
-                                os.rmdir(os.path.join(root, name))
-                            except: 
-                                pass
-                    try: 
-                        os.rmdir(self.src_path)
-                    except: 
-                        pass
+                            try: os.rmdir(os.path.join(root, name))
+                            except: pass
+                    try: os.rmdir(self.src_path)
+                    except: pass
                 self.signals.log_msg.emit("Source files successfully wiped.")
             except Exception as e: 
                 self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Cleanup Error: {e}</span>")
@@ -619,7 +617,7 @@ class CopyEngine(QThread):
                     pass
 
 # =====================================================================
-# UI Components: Clean Liquid Graph (No Bubbles)
+# UI Components: Clean Liquid Graph (Zero dead particle math)
 # =====================================================================
 
 class LiquidSpeedGraph(QWidget):
@@ -630,8 +628,6 @@ class LiquidSpeedGraph(QWidget):
         self.max_val = 1
         self.phase = 0.0
         self.accent = QColor(0, 243, 255)
-        
-        # Bubbles/Particles completely removed based on user request.
         
         self.wave_anim = QVariantAnimation()
         self.wave_anim.setDuration(4000)
@@ -655,6 +651,7 @@ class LiquidSpeedGraph(QWidget):
 
     def reset(self): 
         self.points = [0] * 60
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -857,7 +854,7 @@ class MainWindow(QMainWindow):
         main.setContentsMargins(0,0,0,0)
         
         # -------------------------------------------------------------
-        # RESTORED: Fully Functional Custom Title Bar with Minimize/Maximize
+        # Title Bar
         # -------------------------------------------------------------
         tb = QWidget()
         tb.setFixedHeight(45)
@@ -887,13 +884,19 @@ class MainWindow(QMainWindow):
         tbl.addWidget(self.btn_max)
             
         tbl.addSpacing(15)
-        self.lblt = QLabel("HyperMove Pro - Perfected Edition")
+        self.lblt = QLabel("HyperMove Pro - NVMe Raw Speed Edition")
         self.lblt.setStyleSheet("font-weight: bold; opacity: 0.6; font-size: 11px;")
         tbl.addWidget(self.lblt)
         tbl.addStretch()
         
         main.addWidget(tb)
-        tb.mousePressEvent = lambda e: trigger_native_drag(self)
+        
+        # Guard: Only allow Left Click to trigger the OS window drag
+        def handle_title_click(event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                trigger_native_drag(self)
+                
+        tb.mousePressEvent = handle_title_click
 
         content = QHBoxLayout()
         content.setContentsMargins(25,10,25,25)
@@ -983,7 +986,7 @@ class MainWindow(QMainWindow):
         ops.addWidget(self.bcpy)
         ops.addWidget(self.bmov)
         
-        # Restored Features Settings Row
+        # Settings Row
         settings_grid = QGridLayout()
         lbl_conflict = QLabel("Conflict Handling:")
         self.conflict_combo = QComboBox()
@@ -1001,7 +1004,6 @@ class MainWindow(QMainWindow):
         settings_grid.addWidget(lbl_mode, 1, 0)
         settings_grid.addWidget(self.mode_combo, 1, 1)
 
-        # Restored from v1.0 Checkboxes
         self.chk_verify = QCheckBox("Verify Data Integrity")
         self.chk_verify.setStyleSheet("QCheckBox { color: rgba(255,255,255,0.7); font-size: 11px; }")
         
@@ -1047,13 +1049,11 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def toggle_maximize(self):
-        """ Restored Maximize / Restore Functionality """
         if self.isMaximized():
             self.showNormal()
         else:
             self.showMaximized()
 
-    # Restored from v1.0 - Global Hotkey
     def setup_global_hotkey(self):
         self.show_window_signal.connect(self.bring_to_front)
         if PYNPUT_AVAILABLE:
@@ -1203,7 +1203,9 @@ class MainWindow(QMainWindow):
                 self.log(f"Failed to create CSV: {e}")
                 csv_path_str = ""
         
-        self.progress_bar.setValue(0)
+        self.prog.setValue(0)
+        self.file_prog.setValue(0)
+        
         self.engine.prepare_job(
             src=self.src, 
             dst=self.dst, 
