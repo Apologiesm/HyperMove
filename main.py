@@ -1,8 +1,8 @@
 """
-HyperMove v8.7 - Elite Fluid Edition
+HyperMove v8.8 - Elite Fluid Edition
 The ultimate zero-compromise file transfer engine.
-FIXED: Perfectly smooth native dragging while maintaining 60FPS liquid animations.
-NEW: Spring physics, data-flow particles, and GPU-optimized rendering.
+FIXED: Attribute error crash in DropZone (replaced comma with assignment).
+FIXED: Perfectly smooth native dragging and 60FPS liquid telemetry.
 """
 
 import sys
@@ -22,8 +22,11 @@ import random
 # App Resource Manager
 # =====================================================================
 def resource_path(relative_path):
-    try: base_path = sys._MEIPASS
-    except Exception: base_path = os.path.abspath(".")
+    """ Get absolute path to resource, works for dev and for compiled EXE """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
 # ---------------------------------------------------------
@@ -304,15 +307,15 @@ class LiquidSpeedGraph(QWidget):
         painter.setPen(QPen(QColor(0, 243, 255, 255), 2)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawPath(get_path(0, 3))
 
 # =====================================================================
-# Main Application
+# Main Application Components
 # =====================================================================
 
 class AnimatedDropZone(QFrame):
     dropped = Signal(str); browse = Signal(str); cleared = Signal()
     def __init__(self, title, is_src=True):
-        super().__init__(); self.is_src, self.setFixedHeight(130 if is_src else 110)
+        super().__init__(); self.is_src = is_src; self.setFixedHeight(130 if is_src else 110)
         self.setStyleSheet("AnimatedDropZone { background: rgba(255,255,255,0.03); border: 2px dashed rgba(255,255,255,0.1); border-radius: 12px; }")
-        self.setAcceptDrops(True); self.layout = QGridLayout(self); self.stack = QStackedWidget = QWidget(); self.stack_layout = QGridLayout(self.stack)
+        self.setAcceptDrops(True); self.layout = QGridLayout(self)
         
         self.view_empty = QWidget(); el = QVBoxLayout(self.view_empty); el.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl = QLabel(f"Drop {title} Here"); lbl.setStyleSheet("color: rgba(255,255,255,0.6); font-weight: bold;")
@@ -370,7 +373,7 @@ class MainWindow(QMainWindow):
         tb = QWidget(); tb.setFixedHeight(45); tbl = QHBoxLayout(tb); tbl.setContentsMargins(15,0,15,0)
         for c in ["#FF5F56", "#FFBD2E", "#27C93F"]:
             d = QPushButton(); d.setFixedSize(12,12); d.setStyleSheet(f"background: {c}; border-radius: 6px; border: none;"); tbl.addWidget(d)
-        d.clicked.connect(self.showMaximized); tbl.addSpacing(15); lblt = QLabel("HyperMove Pro - Fluid Master"); lblt.setStyleSheet("font-weight: bold; opacity: 0.6; font-size: 11px;"); tbl.addWidget(lblt); tbl.addStretch()
+        tbl.addSpacing(15); lblt = QLabel("HyperMove Pro - Fluid Master"); lblt.setStyleSheet("font-weight: bold; opacity: 0.6; font-size: 11px;"); tbl.addWidget(lblt); tbl.addStretch()
         main.addWidget(tb); tb.mousePressEvent = lambda e: trigger_native_drag(self)
 
         content = QHBoxLayout(); content.setContentsMargins(25,10,25,25); content.setSpacing(20)
