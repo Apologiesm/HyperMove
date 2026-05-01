@@ -1,7 +1,7 @@
 """
-HyperMove v8.3 - Elite Precision Edition
+HyperMove v8.4 - Elite Precision Edition
 The ultimate zero-compromise file transfer engine.
-UPDATED: Active File Telemetry, High-Precision Counters, and Elastic Liquid Graph.
+UPDATED: Ultra-smooth native Windows dragging and Snap-Layout support.
 """
 
 import sys
@@ -28,7 +28,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 # ---------------------------------------------------------
-# OS-Specific Native Window Blur
+# OS-Specific Native Window Blur & Dragging
 # ---------------------------------------------------------
 def apply_native_window_blur(window_id):
     sys_name = platform.system()
@@ -49,6 +49,16 @@ def apply_native_window_blur(window_id):
             data.SizeOfData = sizeof(accent)
             windll.user32.SetWindowCompositionAttribute(hwnd, byref(data))
         except Exception: pass
+
+def trigger_native_drag(window):
+    """Triggers native OS window dragging to prevent lag and support snapping."""
+    if platform.system() == "Windows":
+        # Professional Windows API call for HTCAPTION drag
+        ctypes.windll.user32.ReleaseCapture()
+        ctypes.windll.user32.SendMessageW(window.winId(), 0xA1, 2, 0)
+    else:
+        # Mac/Linux fallback
+        window.windowHandle().startSystemMove()
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -281,14 +291,14 @@ class CopyEngine(QThread):
                 else: self.files_to_process.append((src_f, dst_f))
             else: self.files_to_process.append((src_f, dst_f))
                     
-        if resumed_count > 0: self.signals.log_msg.emit(f"<span style='color:#FFBD2E;'>Resuming {resumed_count} files.</span>")
+        if resumed_count > 0: self.signals.log_msg.emit(f"<span style='color:#FFBD2E;'>Power-Cut Recovery: Resuming {resumed_count} files.</span>")
         if len(self.skipped_files) > 0: self.signals.log_msg.emit(f"<span style='color:#00F3FF;'>Skipping {len(self.skipped_files)} existing files.</span>")
 
         if self.mode == TransferMode.AUTO:
             self.mode = TransferMode.DIRECT if (len(self.files_to_process) == 1 and self.total_bytes > 1024**3) else TransferMode.PARALLEL
         if self.mode == TransferMode.DIRECT and unaligned_resume_detected:
             self.mode = TransferMode.PARALLEL
-            self.signals.log_msg.emit("<span style='color:#FFBD2E;'>Unaligned boundary. Using Parallel Mode.</span>")
+            self.signals.log_msg.emit("<span style='color:#FFBD2E;'>Alignment mismatch detected. Using Parallel Mode for safety.</span>")
 
     def run(self):
         self.set_state(EngineState.COPYING if self.state != EngineState.RESUMING else EngineState.COPYING)
@@ -303,7 +313,7 @@ class CopyEngine(QThread):
         if self.state == EngineState.PAUSED: return
 
         if self.operation == OperationType.MOVE and not self.failed_files:
-            self.signals.log_msg.emit("Finalizing move safely...")
+            self.signals.log_msg.emit("Transfer complete. Finalizing Move...")
             try:
                 for src_f, dst_f in self.files_to_process:
                     if src_f.exists(): src_f.unlink()
@@ -314,7 +324,7 @@ class CopyEngine(QThread):
                             except: pass
                     try: os.rmdir(self.src_path)
                     except: pass
-                self.signals.log_msg.emit("Move completed flawlessly.")
+                self.signals.log_msg.emit("Source files wiped. Move flawless.")
             except Exception as e: self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Cleanup Error: {e}</span>")
 
         self.set_state(EngineState.IDLE)
@@ -456,9 +466,11 @@ class MacTitleBar(QWidget):
         self.btn_close = self._create_dot("#FF5F56", "#E0443E"); self.btn_min = self._create_dot("#FFBD2E", "#DEA123"); self.btn_max = self._create_dot("#27C93F", "#1AAB29")
         self.btn_close.clicked.connect(self.parent.close); self.btn_min.clicked.connect(self.parent.showMinimized)
         layout.addWidget(self.btn_close); layout.addWidget(self.btn_min); layout.addWidget(self.btn_max); layout.addSpacing(15)
+        
         logo_path = resource_path("logo.ico")
         if os.path.exists(logo_path):
             self.logo_lbl = QLabel(); self.logo_lbl.setPixmap(QIcon(logo_path).pixmap(18, 18)); layout.addWidget(self.logo_lbl); layout.addSpacing(5)
+        
         self.title = QLabel("HyperMove - Elite Precision Edition")
         self.title.setFont(QFont("SF Pro Display", 11, QFont.Weight.Bold)); self.title.setStyleSheet("color: rgba(255, 255, 255, 0.7); letter-spacing: 1px;")
         layout.addWidget(self.title); layout.addStretch()
@@ -469,7 +481,9 @@ class MacTitleBar(QWidget):
         return btn
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton: self.window().windowHandle().startSystemMove()
+        if event.button() == Qt.LeftButton: 
+            # Elite Native Smooth Dragging
+            trigger_native_drag(self.parent)
 
 class GlassCard(QFrame):
     def __init__(self): super().__init__(); self.setStyleSheet("GlassCard { background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; }")
@@ -616,7 +630,8 @@ class MainWindow(QMainWindow):
 
     @Slot(EngineState)
     def on_state_changed(self, state):
-        self.btn_start.setEnabled(state == EngineState.IDLE); self.btn_pause.setEnabled(state == EngineState.COPYING); self.btn_resume.setEnabled(state == EngineState.PAUSED); self.btn_stop.setEnabled(state in [EngineState.COPYING, EngineState.PAUSED, EngineState.RESUMING])
+        self.btn_start.setEnabled(state == EngineState.IDLE); self.btn_pause.setEnabled(state == EngineState.COPYING)
+        self.btn_resume.setEnabled(state == EngineState.PAUSED); self.btn_stop.setEnabled(state in [EngineState.COPYING, EngineState.PAUSED, EngineState.RESUMING])
         self.src_drop.setEnabled(state == EngineState.IDLE); self.dst_drop.setEnabled(state == EngineState.IDLE)
         if state == EngineState.COPYING: self.graph.reset(); self.pulse_anim.start(); self.reset_action_buttons()
         elif state == EngineState.IDLE: self.pulse_anim.stop(); self.speed_shadow.setBlurRadius(20); self.lbl_active_file.setText("Engine Idle")
