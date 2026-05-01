@@ -1,7 +1,7 @@
 """
-HyperMove v8.0 - Liquid & Resilient Edition
+HyperMove v8.1 - Liquid & Resilient Edition
 The ultimate zero-compromise file transfer engine.
-Features advanced Power-Cut auto-resume, fsync hardware flushing, and fluid 60FPS UI animations.
+FIXED: Lag-free native window dragging.
 """
 
 import sys
@@ -22,11 +22,11 @@ from threading import Lock
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for compiled EXE """
     try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
-    path = os.path.join(base_path, relative_path)
-    return path if os.path.exists(path) else ""
+    return os.path.join(base_path, relative_path)
 
 # ---------------------------------------------------------
 # OS-Specific Native Window Blur
@@ -43,7 +43,7 @@ def apply_native_window_blur(window_id):
             hwnd = int(window_id)
             accent = ACCENTPOLICY()
             accent.AccentState = 4 
-            accent.GradientColor = 0x8015151A # Deep premium dark tint
+            accent.GradientColor = 0x8015151A 
             data = WINDOWCOMPOSITIONATTRIBDATA()
             data.Attribute = 19
             data.Data = ctypes.pointer(accent)
@@ -114,10 +114,7 @@ class WindowsDirectIO(DirectIOWrapper):
     def __init__(self, path, mode='r'):
         super().__init__(path, mode)
         self.kernel32 = ctypes.windll.kernel32
-        
-        # 4 = OPEN_ALWAYS (Resume/Append), 2 = CREATE_ALWAYS (Overwrite)
         creation_disposition = 3 if mode == 'r' else (4 if mode == 'a' else 2) 
-        
         self.handle = self.kernel32.CreateFileW(
             str(path), 0x80000000 if mode == 'r' else 0x40000000, 1 | 2,
             None, creation_disposition, 0x20000000, None
@@ -171,31 +168,25 @@ class ParallelWorker(QRunnable):
             if self.engine.state in [EngineState.STOPPING, EngineState.PAUSED]:
                 if self.engine.state == EngineState.PAUSED: self.engine.save_offset(self.src, self.offset)
                 return
-            
             sync_counter = 0
             with open(self.src, 'rb') as fsrc, open(self.dst, 'ab' if self.offset > 0 else 'wb') as fdst:
                 if self.offset > 0: fsrc.seek(self.offset)
                 while True:
                     if self.engine.state in [EngineState.STOPPING, EngineState.PAUSED]:
                         if self.engine.state == EngineState.PAUSED: self.engine.save_offset(self.src, self.offset)
-                        # Ensure buffers are flushed before pausing
                         fdst.flush()
                         os.fsync(fdst.fileno())
                         return
-                    
                     chunk = fsrc.read(CHUNK_SIZE)
                     if not chunk: break
                     fdst.write(chunk)
                     self.offset += len(chunk)
                     self.signals.progress.emit(len(chunk))
-                    
-                    # Hardware Sync: Flushes to physical disk every 50MB to protect against power loss
                     sync_counter += len(chunk)
                     if sync_counter > 50 * 1024 * 1024:
                         fdst.flush()
                         os.fsync(fdst.fileno())
                         sync_counter = 0
-            
             self.signals.finished.emit(str(self.src), str(self.dst), True, "")
         except Exception as e:
             self.signals.finished.emit(str(self.src), str(self.dst), False, str(e))
@@ -256,68 +247,54 @@ class CopyEngine(QThread):
                     dst_f = self.dst_path / self.src_path.name / src_f.relative_to(self.src_path)
                     temp_files.append((src_f, dst_f))
                     
-        # Smart Power-Cut Recovery & File Size Validation
         resumed_files = 0
         unaligned_resume_detected = False
-        
         for src_f, dst_f in temp_files:
             self.files_to_process.append((src_f, dst_f))
             src_size = src_f.stat().st_size
             self.total_bytes += src_size
-            
             if dst_f.exists():
                 dst_size = dst_f.stat().st_size
                 if dst_size < src_size and dst_size > 0:
                     self.file_offsets[str(src_f)] = dst_size
                     self.transferred_bytes += dst_size
                     resumed_files += 1
-                    # Direct I/O requires 4096-byte alignment. If power cut occurs mid-write, it breaks alignment.
-                    if dst_size % 4096 != 0:
-                        unaligned_resume_detected = True
+                    if dst_size % 4096 != 0: unaligned_resume_detected = True
                 elif dst_size == src_size:
                     self.file_offsets[str(src_f)] = dst_size
                     self.transferred_bytes += dst_size
                     
         if resumed_files > 0:
-            self.signals.log_msg.emit(f"<span style='color:#FFBD2E;'>Power-Cut Recovery: Auto-resuming {resumed_files} partial files smoothly.</span>")
+            self.signals.log_msg.emit(f"<span style='color:#FFBD2E;'>Power-Cut Recovery: Auto-resuming {resumed_files} files.</span>")
 
         if self.mode == TransferMode.AUTO:
             self.mode = TransferMode.DIRECT if (len(self.files_to_process) == 1 and self.total_bytes > 1024**3) else TransferMode.PARALLEL
 
-        # Safely fallback to Parallel mode if Direct I/O would crash on an unaligned resume byte
         if self.mode == TransferMode.DIRECT and unaligned_resume_detected:
             self.mode = TransferMode.PARALLEL
-            self.signals.log_msg.emit("<span style='color:#FFBD2E;'>Unaligned boundary detected. Forcing Parallel Mode to guarantee safe resume.</span>")
+            self.signals.log_msg.emit("<span style='color:#FFBD2E;'>Unaligned boundary. Using Parallel Mode for safe resume.</span>")
 
     def run(self):
         self.set_state(EngineState.COPYING if self.state != EngineState.RESUMING else EngineState.COPYING)
         self.last_update_time, self.last_transferred = time.time(), self.transferred_bytes
         self.pool.setMaxThreadCount(self.threads if self.mode == TransferMode.PARALLEL else 1)
-        
         if self.mode == TransferMode.PARALLEL: self._run_parallel()
         else: self._run_direct()
         self.pool.waitForDone()
-
         if self.state == EngineState.STOPPING:
             self._cleanup_partials()
             self.set_state(EngineState.IDLE)
             self.signals.job_finished.emit()
             return
-            
         if self.state == EngineState.PAUSED: return
-
-        # True MOVE Operation: Ensures 100% data integrity before deleting source
         if self.operation == OperationType.MOVE and not self.failed_files:
-            self.signals.log_msg.emit("Integrity check passed. Wiping source files for Move operation...")
+            self.signals.log_msg.emit("Wiping source files for Move...")
             try:
-                if self.src_path.is_file():
-                    self.src_path.unlink()
-                else:
-                    shutil.rmtree(self.src_path)
+                if self.src_path.is_file(): self.src_path.unlink()
+                else: shutil.rmtree(self.src_path)
                 self.signals.log_msg.emit("Source successfully wiped.")
             except Exception as e:
-                self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Failed to delete original files: {e}</span>")
-
+                self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Failed to delete source: {e}</span>")
         self.set_state(EngineState.IDLE)
         self.signals.job_finished.emit()
 
@@ -328,7 +305,6 @@ class CopyEngine(QThread):
             if offset >= src.stat().st_size and src.stat().st_size > 0: continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             self.active_destinations.add(str(dst))
-            
             worker = ParallelWorker(src, dst, self, offset)
             worker.signals.progress.connect(self._on_worker_progress)
             worker.signals.finished.connect(self._on_worker_finished)
@@ -358,7 +334,7 @@ class CopyEngine(QThread):
                 if self.state == EngineState.COPYING: self.active_destinations.remove(str(dst))
             except Exception as e:
                 self.failed_files.append(src)
-                self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Direct I/O Error for {src.name}: {e}</span>")
+                self.signals.log_msg.emit(f"<span style='color:#FF453A;'>Direct I/O Error: {e}</span>")
                 if str(dst) in self.active_destinations: self.active_destinations.remove(str(dst))
 
     def _cleanup_partials(self):
@@ -373,23 +349,18 @@ class CopyEngine(QThread):
         with self.worker_lock: self.transferred_bytes += bytes_transferred
         current_time = time.time()
         elapsed = current_time - self.last_update_time
-        
-        # Telemetry tick rate optimized for visual fluid graphs
         if elapsed > 0.2:
             instant_speed = (self.transferred_bytes - self.last_transferred) / elapsed
             self.speed_history.append(instant_speed)
             if len(self.speed_history) > 10: self.speed_history.pop(0)
-            
             avg_speed = int(sum(self.speed_history) / len(self.speed_history))
             self.last_update_time, self.last_transferred = current_time, self.transferred_bytes
-            
             eta = "Calculating..."
             if avg_speed > 0:
                 secs = int((self.total_bytes - self.transferred_bytes) / avg_speed)
                 if secs > 3600: eta = f"~ {secs//3600}h {(secs%3600)//60}m"
                 elif secs > 60: eta = f"~ {secs//60} min"
                 else: eta = f"~ {secs} sec"
-                
             self.signals.progress_update.emit(self.transferred_bytes, self.total_bytes)
             self.signals.stats_update.emit(self.transferred_bytes, avg_speed, eta)
 
@@ -399,14 +370,13 @@ class CopyEngine(QThread):
             if str(dst) in self.active_destinations: self.active_destinations.remove(str(dst))
             if not success:
                 self.failed_files.append(src)
-                self.signals.log_msg.emit(f"Error transferring {Path(src).name}: {error_msg}")
+                self.signals.log_msg.emit(f"Error: {error_msg}")
 
 # =====================================================================
 # UI Components: Creative Liquid Live Graph
 # =====================================================================
 
 class LiquidSpeedGraph(QWidget):
-    """Custom widget that draws a beautiful dual-wave liquid graph of transfer speeds."""
     def __init__(self):
         super().__init__()
         self.setFixedHeight(70)
@@ -414,8 +384,6 @@ class LiquidSpeedGraph(QWidget):
         self.max_val = 1
         self.phase = 0.0
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        # Hardware-accelerated continuous phase animation for the liquid ripple effect
         self.wave_anim = QVariantAnimation()
         self.wave_anim.setDuration(3000)
         self.wave_anim.setStartValue(0.0)
@@ -441,11 +409,9 @@ class LiquidSpeedGraph(QWidget):
         path.moveTo(0, h)
         for i, val in enumerate(self.points):
             x = i * step_x
-            # Add trigonometric sine wave to create liquid ripple
             ripple = math.sin(self.phase * 3 + i * 0.2 + phase_offset) * (4 * amplitude_multiplier)
             y = h - ((val / self.max_val) * h) + ripple
-            y = max(2, min(h, y)) # Clamp beautifully to frame
-            
+            y = max(2, min(h, y))
             if i == 0: path.lineTo(x, y)
             else:
                 prev_x = (i - 1) * step_x
@@ -453,7 +419,6 @@ class LiquidSpeedGraph(QWidget):
                 prev_ripple = math.sin(self.phase * 3 + (i - 1) * 0.2 + phase_offset) * (4 * amplitude_multiplier)
                 prev_y = h - ((prev_val / self.max_val) * h) + prev_ripple
                 prev_y = max(2, min(h, prev_y))
-                
                 control_x = prev_x + (x - prev_x) / 2
                 path.cubicTo(control_x, prev_y, control_x, y, x, y)
         path.lineTo(w, h)
@@ -465,8 +430,6 @@ class LiquidSpeedGraph(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         step_x = w / (len(self.points) - 1)
-        
-        # Draw Background (Slower, opaque liquid wave)
         back_path = self._build_wave_path(w, h, step_x, phase_offset=1.5, amplitude_multiplier=1.2)
         grad_back = QLinearGradient(0, 0, 0, h)
         grad_back.setColorAt(0, QColor(0, 243, 255, 60)) 
@@ -474,8 +437,6 @@ class LiquidSpeedGraph(QWidget):
         painter.setBrush(QBrush(grad_back))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(back_path)
-
-        # Draw Foreground (Faster, sharp cresting wave)
         front_path = self._build_wave_path(w, h, step_x, phase_offset=0, amplitude_multiplier=0.8)
         grad_front = QLinearGradient(0, 0, 0, h)
         grad_front.setColorAt(0, QColor(0, 243, 255, 140)) 
@@ -499,40 +460,30 @@ class MacTitleBar(QWidget):
         super().__init__(parent)
         self.parent = parent
         self.setFixedHeight(40)
-        
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 0, 16, 0)
-        
         self.btn_close = self._create_dot("#FF5F56", "#E0443E")
         self.btn_min = self._create_dot("#FFBD2E", "#DEA123")
         self.btn_max = self._create_dot("#27C93F", "#1AAB29")
-        
         self.btn_close.clicked.connect(self.parent.close)
         self.btn_min.clicked.connect(self.parent.showMinimized)
-        
         layout.addWidget(self.btn_close)
         layout.addWidget(self.btn_min)
         layout.addWidget(self.btn_max)
         layout.addSpacing(15)
-
-        # Application Logo in Title Bar
+        
         logo_path = resource_path("logo.ico")
-        if logo_path:
+        if os.path.exists(logo_path):
             self.logo_lbl = QLabel()
             self.logo_lbl.setPixmap(QIcon(logo_path).pixmap(18, 18))
             layout.addWidget(self.logo_lbl)
             layout.addSpacing(5)
-        
+
         self.title = QLabel("HyperMove - Liquid Resilient Edition")
         self.title.setFont(QFont("SF Pro Display", 11, QFont.Weight.Bold))
         self.title.setStyleSheet("color: rgba(255, 255, 255, 0.7); letter-spacing: 1px;")
         layout.addWidget(self.title)
-        
         layout.addStretch()
-        spacer = QWidget()
-        spacer.setFixedSize(50, 12)
-        layout.addWidget(spacer)
-        self.start_pos = None
 
     def _create_dot(self, color, border_color):
         btn = QPushButton()
@@ -542,10 +493,9 @@ class MacTitleBar(QWidget):
         return btn
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton: self.start_pos = event.globalPosition().toPoint() - self.parent.frameGeometry().topLeft()
-    def mouseMoveEvent(self, event):
-        if self.start_pos: self.parent.move(event.globalPosition().toPoint() - self.start_pos)
-    def mouseReleaseEvent(self, event): self.start_pos = None
+        if event.button() == Qt.LeftButton:
+            # FIX: Native lag-free dragging
+            self.window().windowHandle().startSystemMove()
 
 class GlassCard(QFrame):
     def __init__(self):
@@ -556,29 +506,20 @@ class AnimatedSmartDropZone(QFrame):
     path_dropped = Signal(str)
     browse_clicked = Signal(str) 
     clear_clicked = Signal()
-
     def __init__(self, title, is_source=True):
         super().__init__()
         self.is_source = is_source
         self.setAcceptDrops(True)
         self.setFixedHeight(120 if is_source else 100)
-        self.current_path = None
-        
         self.base_style = "AnimatedSmartDropZone { background-color: rgba(255, 255, 255, 0.02); border: 2px dashed rgba(255, 255, 255, 0.1); border-radius: 12px; }"
         self.setStyleSheet(self.base_style)
-        
         self.layout = QGridLayout(self)
-        self.layout.setContentsMargins(10, 10, 10, 10)
-
-        # View 1: Empty
         self.view_empty = QWidget()
         empty_layout = QVBoxLayout(self.view_empty)
         empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_prompt = QLabel(f"Drop {title} Here")
         lbl_prompt.setFont(QFont("SF Pro Display", 11, QFont.Weight.Medium))
         lbl_prompt.setStyleSheet("color: rgba(255,255,255,0.7);")
-        lbl_prompt.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
         btn_layout = QHBoxLayout()
         btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if is_source:
@@ -588,58 +529,43 @@ class AnimatedSmartDropZone(QFrame):
         self.btn_folder = self._create_btn("📁 Folder")
         self.btn_folder.clicked.connect(lambda: self.browse_clicked.emit('folder'))
         btn_layout.addWidget(self.btn_folder)
-
         empty_layout.addWidget(lbl_prompt)
         empty_layout.addLayout(btn_layout)
-
-        # View 2: Selected
         self.view_selected = QWidget()
         sel_layout = QVBoxLayout(self.view_selected)
         sel_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
         self.lbl_sel_icon = QLabel("📁")
         self.lbl_sel_icon.setFont(QFont("SF Pro Display", 18))
-        self.lbl_sel_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_sel_name = QLabel("filename")
         self.lbl_sel_name.setFont(QFont("SF Pro Text", 11, QFont.Weight.Bold))
         self.lbl_sel_name.setStyleSheet("color: white;")
-        self.lbl_sel_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_sel_info = QLabel("1.2 GB")
         self.lbl_sel_info.setStyleSheet("color: rgba(255,255,255,0.5);")
-        self.lbl_sel_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.btn_clear = self._create_btn("✕ Clear", is_clear=True)
         self.btn_clear.clicked.connect(self.clear_selection)
-
         sel_layout.addWidget(self.lbl_sel_icon)
         sel_layout.addWidget(self.lbl_sel_name)
         sel_layout.addWidget(self.lbl_sel_info)
         sel_layout.addWidget(self.btn_clear, alignment=Qt.AlignmentFlag.AlignHCenter)
-
         self.layout.addWidget(self.view_empty, 0, 0)
         self.layout.addWidget(self.view_selected, 0, 0)
-        
         self.eff_empty = QGraphicsOpacityEffect(self.view_empty)
         self.view_empty.setGraphicsEffect(self.eff_empty)
         self.eff_sel = QGraphicsOpacityEffect(self.view_selected)
         self.eff_sel.setOpacity(0.0)
         self.view_selected.setGraphicsEffect(self.eff_sel)
         self.view_selected.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-
         self.drag_pulse = QVariantAnimation()
         self.drag_pulse.setDuration(500)
         self.drag_pulse.setStartValue(15) 
         self.drag_pulse.setEndValue(70)
         self.drag_pulse.setLoopCount(-1)
-        self.drag_pulse.setEasingCurve(QEasingCurve.Type.InOutSine)
         self.drag_pulse.valueChanged.connect(self._animate_drag_glow)
 
     def _create_btn(self, text, is_clear=False):
         btn = QPushButton(text)
         btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn.setStyleSheet(f"""
-            QPushButton {{ background-color: rgba(255,255,255,0.08); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; padding: 4px 14px; font-weight: 500; font-size:11px; }}
-            QPushButton:hover {{ background-color: {'rgba(255,69,58,0.2)' if is_clear else 'rgba(0,243,255,0.15)'}; border: 1px solid {'rgba(255,69,58,0.5)' if is_clear else 'rgba(0,243,255,0.4)'}; }}
-        """)
+        btn.setStyleSheet(f"QPushButton {{ background-color: rgba(255,255,255,0.08); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; padding: 4px 14px; font-weight: 500; font-size:11px; }} QPushButton:hover {{ background-color: {'rgba(255,69,58,0.2)' if is_clear else 'rgba(0,243,255,0.15)'}; border: 1px solid {'rgba(255,69,58,0.5)' if is_clear else 'rgba(0,243,255,0.4)'}; }}")
         return btn
 
     def _animate_drag_glow(self, alpha):
@@ -647,20 +573,12 @@ class AnimatedSmartDropZone(QFrame):
         self.setStyleSheet(f"AnimatedSmartDropZone {{ background-color: rgba(0, 243, 255, {alpha/255.0}); border: 2px dashed rgba(0, 243, 255, {border_alpha/255.0}); border-radius: 12px; }}")
 
     def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            self.drag_pulse.start()
-            event.acceptProposedAction()
-
-    def dragLeaveEvent(self, event):
-        self.drag_pulse.stop()
-        self.setStyleSheet(self.base_style)
-
+        if event.mimeData().hasUrls(): self.drag_pulse.start(); event.acceptProposedAction()
+    def dragLeaveEvent(self, event): self.drag_pulse.stop(); self.setStyleSheet(self.base_style)
     def dropEvent(self, event: QDropEvent):
         self.dragLeaveEvent(None)
         urls = event.mimeData().urls()
-        if urls:
-            self.set_path(urls[0].toLocalFile())
-            self.path_dropped.emit(urls[0].toLocalFile())
+        if urls: self.set_path(urls[0].toLocalFile()); self.path_dropped.emit(urls[0].toLocalFile())
 
     def crossfade_view(self, show_selected):
         self.anim_group = QParallelAnimationGroup()
@@ -673,7 +591,6 @@ class AnimatedSmartDropZone(QFrame):
         self.view_selected.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not show_selected)
 
     def set_path(self, path):
-        self.current_path = path
         p = Path(path)
         self.lbl_sel_icon.setText("📄" if p.is_file() else "📁")
         self.lbl_sel_name.setText(p.name if len(p.name) < 35 else f"...{p.name[-30:]}")
@@ -684,10 +601,7 @@ class AnimatedSmartDropZone(QFrame):
         except: self.lbl_sel_info.setText("Size unknown")
         self.crossfade_view(True)
 
-    def clear_selection(self):
-        self.current_path = None
-        self.crossfade_view(False)
-        self.clear_clicked.emit()
+    def clear_selection(self): self.crossfade_view(False); self.clear_clicked.emit()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -696,19 +610,12 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.resize(880, 600)
         
-        # Set Taskbar & Application Window Icon
         logo_path = resource_path("logo.ico")
-        if logo_path:
-            self.setWindowIcon(QIcon(logo_path))
+        if os.path.exists(logo_path): self.setWindowIcon(QIcon(logo_path))
 
-        # Hardware-accelerated Window Fade-In Intro
         self.setWindowOpacity(0.0)
         self.intro_anim = QPropertyAnimation(self, b"windowOpacity")
-        self.intro_anim.setDuration(900)
-        self.intro_anim.setStartValue(0.0)
-        self.intro_anim.setEndValue(1.0)
-        self.intro_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.intro_anim.start()
+        self.intro_anim.setDuration(900); self.intro_anim.setStartValue(0.0); self.intro_anim.setEndValue(1.0); self.intro_anim.setEasingCurve(QEasingCurve.Type.OutCubic); self.intro_anim.start()
 
         self.engine = CopyEngine()
         self.engine.signals.log_msg.connect(self.log_message)
@@ -716,7 +623,6 @@ class MainWindow(QMainWindow):
         self.engine.signals.stats_update.connect(self.update_stats)
         self.engine.signals.state_changed.connect(self.on_state_changed)
         self.engine.signals.job_finished.connect(self.on_job_finished)
-        
         self.src_path, self.dst_path = "", ""
         self.current_operation = OperationType.COPY
         self.init_ui()
@@ -727,284 +633,114 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.central_widget.setStyleSheet("QWidget#centralWidget { background-color: rgba(22, 22, 24, 180); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; } QLabel { font-family: 'SF Pro Display', 'Segoe UI', Arial; }")
         self.central_widget.setObjectName("centralWidget")
-        
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(60)
-        shadow.setColor(QColor(0, 0, 0, 200))
-        shadow.setOffset(0, 25)
-        self.central_widget.setGraphicsEffect(shadow)
-        
-        main_layout = QVBoxLayout(self.central_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        self.title_bar = MacTitleBar(self)
-        main_layout.addWidget(self.title_bar)
-
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(25, 10, 25, 25)
-        content_layout.setSpacing(20)
-
-        # === LEFT PANEL ===
-        left_panel = QVBoxLayout()
-        left_panel.setSpacing(12)
-        
+        shadow.setBlurRadius(60); shadow.setColor(QColor(0, 0, 0, 200)); shadow.setOffset(0, 25); self.central_widget.setGraphicsEffect(shadow)
+        main_layout = QVBoxLayout(self.central_widget); main_layout.setContentsMargins(0, 0, 0, 0)
+        self.title_bar = MacTitleBar(self); main_layout.addWidget(self.title_bar)
+        content_layout = QHBoxLayout(); content_layout.setContentsMargins(25, 10, 25, 25); content_layout.setSpacing(20)
+        left_panel = QVBoxLayout(); left_panel.setSpacing(12)
         self.src_drop = AnimatedSmartDropZone("Source Folder/Game")
         self.src_drop.path_dropped.connect(self.set_source)
         self.src_drop.browse_clicked.connect(lambda t: self.browse_path(t, is_source=True))
         self.src_drop.clear_clicked.connect(lambda: self.set_source(""))
-        
         self.dst_drop = AnimatedSmartDropZone("Target Drive", is_source=False)
         self.dst_drop.path_dropped.connect(self.set_dest)
         self.dst_drop.browse_clicked.connect(lambda t: self.browse_path(t, is_source=False))
         self.dst_drop.clear_clicked.connect(lambda: self.set_dest(""))
-        
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet("QTextEdit { background-color: rgba(0,0,0,0.15); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; color: rgba(255,255,255,0.6); font-family: 'SF Mono', 'Consolas', monospace; font-size: 10px; padding: 10px; } QScrollBar:vertical { width: 4px; background: transparent; } QScrollBar::handle:vertical { background: rgba(255,255,255,0.2); border-radius: 2px; }")
-        
-        lbl_log = QLabel("SYSTEM LOG")
-        lbl_log.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 10px; font-weight: bold; letter-spacing: 2px;")
-        
-        left_panel.addWidget(self.src_drop)
-        left_panel.addWidget(self.dst_drop)
-        left_panel.addSpacing(5)
-        left_panel.addWidget(lbl_log)
-        left_panel.addWidget(self.log_text)
-        
-        # === RIGHT PANEL (Telemetry Dashboard) ===
-        right_panel = QVBoxLayout()
-        right_panel.setSpacing(15)
-        
-        dash_card = GlassCard()
-        dash_layout = QVBoxLayout(dash_card)
-        dash_layout.setContentsMargins(0, 30, 0, 0) 
-        
-        self.lbl_speed = QLabel("0.0 MB/s")
-        self.lbl_speed.setFont(QFont("SF Pro Display", 48, QFont.Weight.Bold))
-        self.lbl_speed.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_speed.setStyleSheet("color: white; background: transparent; border: none;")
-        
-        self.speed_shadow = QGraphicsDropShadowEffect()
-        self.speed_shadow.setBlurRadius(20)
-        self.speed_shadow.setColor(QColor(0, 243, 255, 60))
-        self.speed_shadow.setOffset(0, 0)
-        self.lbl_speed.setGraphicsEffect(self.speed_shadow)
-        
-        self.pulse_anim = QVariantAnimation()
-        self.pulse_anim.setDuration(800)
-        self.pulse_anim.setStartValue(10.0)
-        self.pulse_anim.setEndValue(40.0)
-        self.pulse_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        self.pulse_anim.setLoopCount(-1)
-        self.pulse_anim.valueChanged.connect(self.speed_shadow.setBlurRadius)
-
-        stats_layout = QHBoxLayout()
-        stats_layout.setContentsMargins(20, 0, 20, 0)
-        self.lbl_transferred = QLabel("-- / --")
-        self.lbl_eta = QLabel("ETA: --")
-        for lbl in [self.lbl_transferred, self.lbl_eta]:
-            lbl.setFont(QFont("SF Pro Text", 11))
-            lbl.setStyleSheet("color: rgba(255, 255, 255, 0.6);")
-        self.lbl_eta.setAlignment(Qt.AlignmentFlag.AlignRight)
-        stats_layout.addWidget(self.lbl_transferred)
-        stats_layout.addWidget(self.lbl_eta)
-        
+        lbl_log = QLabel("SYSTEM LOG"); lbl_log.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 10px; font-weight: bold; letter-spacing: 2px;")
+        left_panel.addWidget(self.src_drop); left_panel.addWidget(self.dst_drop); left_panel.addSpacing(5); left_panel.addWidget(lbl_log); left_panel.addWidget(self.log_text)
+        right_panel = QVBoxLayout(); right_panel.setSpacing(15)
+        dash_card = GlassCard(); dash_layout = QVBoxLayout(dash_card); dash_layout.setContentsMargins(0, 30, 0, 0) 
+        self.lbl_speed = QLabel("0.0 MB/s"); self.lbl_speed.setFont(QFont("SF Pro Display", 48, QFont.Weight.Bold)); self.lbl_speed.setAlignment(Qt.AlignmentFlag.AlignCenter); self.lbl_speed.setStyleSheet("color: white; background: transparent; border: none;")
+        self.speed_shadow = QGraphicsDropShadowEffect(); self.speed_shadow.setBlurRadius(20); self.speed_shadow.setColor(QColor(0, 243, 255, 60)); self.speed_shadow.setOffset(0, 0); self.lbl_speed.setGraphicsEffect(self.speed_shadow)
+        self.pulse_anim = QVariantAnimation(); self.pulse_anim.setDuration(800); self.pulse_anim.setStartValue(10.0); self.pulse_anim.setEndValue(40.0); self.pulse_anim.setLoopCount(-1); self.pulse_anim.valueChanged.connect(self.speed_shadow.setBlurRadius)
+        stats_layout = QHBoxLayout(); stats_layout.setContentsMargins(20, 0, 20, 0)
+        self.lbl_transferred = QLabel("-- / --"); self.lbl_eta = QLabel("ETA: --")
+        for lbl in [self.lbl_transferred, self.lbl_eta]: lbl.setFont(QFont("SF Pro Text", 11)); lbl.setStyleSheet("color: rgba(255, 255, 255, 0.6);")
+        self.lbl_eta.setAlignment(Qt.AlignmentFlag.AlignRight); stats_layout.addWidget(self.lbl_transferred); stats_layout.addWidget(self.lbl_eta)
         self.graph = LiquidSpeedGraph()
-        
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(4)
-        self.progress_bar.setStyleSheet("QProgressBar { background-color: rgba(255,255,255,0.05); border: none; } QProgressBar::chunk { background-color: #00F3FF; }")
-        
-        self.prog_anim = QPropertyAnimation(self.progress_bar, b"value")
-        self.prog_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.prog_anim.setDuration(400)
-
-        dash_layout.addWidget(self.lbl_speed)
-        dash_layout.addSpacing(15)
-        dash_layout.addLayout(stats_layout)
-        dash_layout.addSpacing(15)
-        dash_layout.addWidget(self.graph)
-        dash_layout.addWidget(self.progress_bar)
-        
-        # Controls Area
-        controls_card = GlassCard()
-        controls_layout = QVBoxLayout(controls_card)
-        controls_layout.setContentsMargins(20, 20, 20, 20)
-        
-        # Operation Selector (Copy vs Move)
+        self.progress_bar = QProgressBar(); self.progress_bar.setTextVisible(False); self.progress_bar.setFixedHeight(4); self.progress_bar.setStyleSheet("QProgressBar { background-color: rgba(255,255,255,0.05); border: none; } QProgressBar::chunk { background-color: #00F3FF; }")
+        self.prog_anim = QPropertyAnimation(self.progress_bar, b"value"); self.prog_anim.setEasingCurve(QEasingCurve.Type.OutCubic); self.prog_anim.setDuration(400)
+        dash_layout.addWidget(self.lbl_speed); dash_layout.addSpacing(15); dash_layout.addLayout(stats_layout); dash_layout.addSpacing(15); dash_layout.addWidget(self.graph); dash_layout.addWidget(self.progress_bar)
+        controls_card = GlassCard(); controls_layout = QVBoxLayout(controls_card); controls_layout.setContentsMargins(20, 20, 20, 20)
         op_layout = QHBoxLayout()
-        self.btn_op_copy = QPushButton("COPY (Keep Original)")
-        self.btn_op_move = QPushButton("MOVE (Delete Original)")
-        self.op_group = QButtonGroup(self)
-        self.op_group.addButton(self.btn_op_copy, 0)
-        self.op_group.addButton(self.btn_op_move, 1)
-        
+        self.btn_op_copy = QPushButton("COPY (Keep Original)"); self.btn_op_move = QPushButton("MOVE (Delete Original)")
+        self.op_group = QButtonGroup(self); self.op_group.addButton(self.btn_op_copy, 0); self.op_group.addButton(self.btn_op_move, 1)
         for btn in [self.btn_op_copy, self.btn_op_move]:
-            btn.setCheckable(True)
-            btn.setFixedHeight(28)
-            btn.setFont(QFont("SF Pro Text", 10, QFont.Weight.Bold))
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn.setStyleSheet("""
-                QPushButton { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; }
-                QPushButton:checked { background: rgba(0, 243, 255, 0.15); color: #00F3FF; border: 1px solid #00F3FF; }
-                QPushButton:hover:!checked { background: rgba(255,255,255,0.1); }
-            """)
-        self.btn_op_copy.setChecked(True)
-        self.op_group.buttonClicked.connect(self.update_operation_mode)
-        op_layout.addWidget(self.btn_op_copy)
-        op_layout.addWidget(self.btn_op_move)
-
-        btn_container = QWidget()
-        btn_container.setFixedHeight(45)
-        btn_layout = QGridLayout(btn_container)
-        btn_layout.setContentsMargins(0,0,0,0)
-        
-        self.btn_start = QPushButton("START COPY")
-        self.btn_start.setFont(QFont("SF Pro Text", 14, QFont.Weight.Bold))
-        self.btn_start.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_start.setStyleSheet("QPushButton { background-color: #00F3FF; color: black; border-radius: 10px; } QPushButton:hover { background-color: #00D0FF; } QPushButton:disabled { background-color: rgba(255,255,255,0.05); color: rgba(255,255,255,0.2); }")
-        
-        self.btn_open_dest = QPushButton("📂 Open Destination Drive")
-        self.btn_open_dest.setFont(QFont("SF Pro Text", 13, QFont.Weight.Medium))
-        self.btn_open_dest.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_open_dest.setStyleSheet("QPushButton { background-color: rgba(255,255,255,0.1); color: white; border-radius: 10px; border: 1px solid rgba(255,255,255,0.15); } QPushButton:hover { background-color: rgba(255,255,255,0.2); }")
-        
-        btn_layout.addWidget(self.btn_start, 0, 0)
-        btn_layout.addWidget(self.btn_open_dest, 0, 0)
-        
-        self.eff_start = QGraphicsOpacityEffect(self.btn_start)
-        self.btn_start.setGraphicsEffect(self.eff_start)
-        self.eff_open = QGraphicsOpacityEffect(self.btn_open_dest)
-        self.eff_open.setOpacity(0.0)
-        self.btn_open_dest.setGraphicsEffect(self.eff_open)
-        self.btn_open_dest.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        
+            btn.setCheckable(True); btn.setFixedHeight(28); btn.setFont(QFont("SF Pro Text", 10, QFont.Weight.Bold)); btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet("QPushButton { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; } QPushButton:checked { background: rgba(0, 243, 255, 0.15); color: #00F3FF; border: 1px solid #00F3FF; }")
+        self.btn_op_copy.setChecked(True); self.op_group.buttonClicked.connect(self.update_operation_mode); op_layout.addWidget(self.btn_op_copy); op_layout.addWidget(self.btn_op_move)
+        btn_container = QWidget(); btn_container.setFixedHeight(45); btn_layout = QGridLayout(btn_container); btn_layout.setContentsMargins(0,0,0,0)
+        self.btn_start = QPushButton("START COPY"); self.btn_start.setFont(QFont("SF Pro Text", 14, QFont.Weight.Bold)); self.btn_start.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_start.setStyleSheet("QPushButton { background-color: #00F3FF; color: black; border-radius: 10px; } QPushButton:hover { background-color: #00D0FF; }")
+        self.btn_open_dest = QPushButton("📂 Open Destination Drive"); self.btn_open_dest.setFont(QFont("SF Pro Text", 13, QFont.Weight.Medium)); self.btn_open_dest.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_open_dest.setStyleSheet("QPushButton { background-color: rgba(255,255,255,0.1); color: white; border-radius: 10px; border: 1px solid rgba(255,255,255,0.15); }")
+        btn_layout.addWidget(self.btn_start, 0, 0); btn_layout.addWidget(self.btn_open_dest, 0, 0)
+        self.eff_start = QGraphicsOpacityEffect(self.btn_start); self.btn_start.setGraphicsEffect(self.eff_start)
+        self.eff_open = QGraphicsOpacityEffect(self.btn_open_dest); self.eff_open.setOpacity(0.0); self.btn_open_dest.setGraphicsEffect(self.eff_open); self.btn_open_dest.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         control_action_layout = QHBoxLayout()
-        self.btn_pause = self._make_sec_btn("Pause")
-        self.btn_resume = self._make_sec_btn("Resume")
-        self.btn_stop = self._make_sec_btn("Cancel", "#FF453A", "rgba(255,69,58,0.2)")
-        for b in [self.btn_pause, self.btn_resume, self.btn_stop]: 
-            b.setEnabled(False)
-            control_action_layout.addWidget(b)
-        
-        # Hardware Mode
-        mode_layout = QHBoxLayout()
-        lbl_mode = QLabel("Hardware Profile:")
-        lbl_mode.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems([m.value for m in TransferMode])
-        self.mode_combo.setStyleSheet("QComboBox { background: transparent; color: white; border: none; font-weight: bold; } QComboBox::drop-down { border: none; }")
-        mode_layout.addWidget(lbl_mode)
-        mode_layout.addWidget(self.mode_combo)
-        mode_layout.addStretch()
-
-        controls_layout.addLayout(op_layout)
-        controls_layout.addSpacing(10)
-        controls_layout.addWidget(btn_container)
-        controls_layout.addSpacing(10)
-        controls_layout.addLayout(control_action_layout)
-        controls_layout.addSpacing(10)
-        controls_layout.addLayout(mode_layout)
-
-        right_panel.addWidget(dash_card)
-        right_panel.addWidget(controls_card)
-        
-        content_layout.addLayout(left_panel, 45)
-        content_layout.addLayout(right_panel, 55)
-        main_layout.addLayout(content_layout)
-
-        self.btn_start.clicked.connect(self.start_transfer)
-        self.btn_open_dest.clicked.connect(self.open_destination)
-        self.btn_pause.clicked.connect(lambda: self.engine.set_state(EngineState.PAUSED))
-        self.btn_resume.clicked.connect(lambda: [self.engine.set_state(EngineState.RESUMING), self.engine.start()])
-        self.btn_stop.clicked.connect(self.stop_transfer)
-
-        self.log_message("HyperDrive Engine Online. Ready for massive data transfers.")
+        self.btn_pause = self._make_sec_btn("Pause"); self.btn_resume = self._make_sec_btn("Resume"); self.btn_stop = self._make_sec_btn("Cancel", "#FF453A", "rgba(255,69,58,0.2)")
+        for b in [self.btn_pause, self.btn_resume, self.btn_stop]: b.setEnabled(False); control_action_layout.addWidget(b)
+        mode_layout = QHBoxLayout(); lbl_mode = QLabel("Hardware Profile:"); lbl_mode.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
+        self.mode_combo = QComboBox(); self.mode_combo.addItems([m.value for m in TransferMode]); self.mode_combo.setStyleSheet("QComboBox { background: transparent; color: white; border: none; font-weight: bold; }")
+        mode_layout.addWidget(lbl_mode); mode_layout.addWidget(self.mode_combo); mode_layout.addStretch()
+        controls_layout.addLayout(op_layout); controls_layout.addSpacing(10); controls_layout.addWidget(btn_container); controls_layout.addSpacing(10); controls_layout.addLayout(control_action_layout); controls_layout.addSpacing(10); controls_layout.addLayout(mode_layout)
+        right_panel.addWidget(dash_card); right_panel.addWidget(controls_card)
+        content_layout.addLayout(left_panel, 45); content_layout.addLayout(right_panel, 55); main_layout.addLayout(content_layout)
+        self.btn_start.clicked.connect(self.start_transfer); self.btn_open_dest.clicked.connect(self.open_destination); self.btn_pause.clicked.connect(lambda: self.engine.set_state(EngineState.PAUSED))
+        self.btn_resume.clicked.connect(lambda: [self.engine.set_state(EngineState.RESUMING), self.engine.start()]); self.btn_stop.clicked.connect(self.stop_transfer)
 
     def update_operation_mode(self, btn):
         self.current_operation = OperationType.COPY if btn == self.btn_op_copy else OperationType.MOVE
         self.btn_start.setText(f"START {self.current_operation.name}")
-        self.btn_start.setStyleSheet(f"QPushButton {{ background-color: {'#00F3FF' if self.current_operation == OperationType.COPY else '#FF2E93'}; color: {'black' if self.current_operation == OperationType.COPY else 'white'}; border-radius: 10px; }} QPushButton:hover {{ background-color: {'#00D0FF' if self.current_operation == OperationType.COPY else '#FF147A'}; }} QPushButton:disabled {{ background-color: rgba(255,255,255,0.05); color: rgba(255,255,255,0.2); }}")
+        color = '#00F3FF' if self.current_operation == OperationType.COPY else '#FF2E93'
+        self.btn_start.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {'black' if self.current_operation == OperationType.COPY else 'white'}; border-radius: 10px; }}")
 
     def _make_sec_btn(self, text, hover_color="#ffffff", hover_bg="rgba(255,255,255,0.1)"):
-        btn = QPushButton(text)
-        btn.setFixedHeight(30)
-        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn.setStyleSheet(f"QPushButton {{ background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.8); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; font-family: 'SF Pro Text', 'Segoe UI'; font-size: 11px;}} QPushButton:hover {{ background: {hover_bg}; color: {hover_color}; }} QPushButton:disabled {{ background: transparent; border: 1px solid rgba(255,255,255,0.02); color: rgba(255,255,255,0.2); }}")
+        btn = QPushButton(text); btn.setFixedHeight(30); btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setStyleSheet(f"QPushButton {{ background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.8); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; font-size: 11px;}} QPushButton:hover {{ background: {hover_bg}; color: {hover_color}; }}")
         return btn
 
     def browse_path(self, browse_type, is_source):
         path = QFileDialog.getOpenFileName(self, "Select Source")[0] if browse_type == 'file' else QFileDialog.getExistingDirectory(self, "Select Folder")
-        if path:
-            (self.src_drop if is_source else self.dst_drop).set_path(path)
-            self.set_source(path) if is_source else self.set_dest(path)
+        if path: (self.src_drop if is_source else self.dst_drop).set_path(path); self.set_source(path) if is_source else self.set_dest(path)
 
-    def set_source(self, path): 
-        self.src_path = path
-        self.reset_action_buttons()
-
-    def set_dest(self, path): 
-        self.dst_path = path
-        self.reset_action_buttons()
+    def set_source(self, path): self.src_path = path; self.reset_action_buttons()
+    def set_dest(self, path): self.dst_path = path; self.reset_action_buttons()
 
     @Slot(str)
     def log_message(self, msg):
-        ts = time.strftime("%H:%M:%S")
-        self.log_text.append(f"<span style='color:rgba(255,255,255,0.3);'>[{ts}]</span> {msg}")
-        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+        ts = time.strftime("%H:%M:%S"); self.log_text.append(f"<span style='color:rgba(255,255,255,0.3);'>[{ts}]</span> {msg}"); self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     @Slot(int, int)
     def update_progress(self, transferred, total):
-        if total > 0:
-            self.prog_anim.setEndValue(int((transferred / total) * 100))
-            self.prog_anim.start()
-            self.lbl_transferred.setText(f"{format_size(transferred)} / {format_size(total)}")
+        if total > 0: self.prog_anim.setEndValue(int((transferred / total) * 100)); self.prog_anim.start(); self.lbl_transferred.setText(f"{format_size(transferred)} / {format_size(total)}")
 
     @Slot(int, int, str)
     def update_stats(self, transferred, speed, eta):
-        self.graph.update_data(speed)
-        mb_speed = speed / (1024*1024)
-        self.lbl_speed.setText(f"{mb_speed/1024:.2f} GB/s" if mb_speed > 1024 else f"{mb_speed:.1f} MB/s")
-        self.lbl_eta.setText(f"ETA: {eta}")
+        self.graph.update_data(speed); mb_speed = speed / (1024*1024)
+        self.lbl_speed.setText(f"{mb_speed/1024:.2f} GB/s" if mb_speed > 1024 else f"{mb_speed:.1f} MB/s"); self.lbl_eta.setText(f"ETA: {eta}")
 
     @Slot(EngineState)
     def on_state_changed(self, state):
-        self.btn_start.setEnabled(state == EngineState.IDLE)
-        self.btn_pause.setEnabled(state == EngineState.COPYING)
-        self.btn_resume.setEnabled(state == EngineState.PAUSED)
-        self.btn_stop.setEnabled(state in [EngineState.COPYING, EngineState.PAUSED, EngineState.RESUMING])
-        self.src_drop.setEnabled(state == EngineState.IDLE)
-        self.dst_drop.setEnabled(state == EngineState.IDLE)
-        self.btn_op_copy.setEnabled(state == EngineState.IDLE)
-        self.btn_op_move.setEnabled(state == EngineState.IDLE)
-        
-        if state == EngineState.COPYING:
-            self.graph.reset()
-            self.pulse_anim.start()
-            self.reset_action_buttons()
-        elif state == EngineState.IDLE:
-            self.pulse_anim.stop()
-            self.speed_shadow.setBlurRadius(20)
+        self.btn_start.setEnabled(state == EngineState.IDLE); self.btn_pause.setEnabled(state == EngineState.COPYING); self.btn_resume.setEnabled(state == EngineState.PAUSED); self.btn_stop.setEnabled(state in [EngineState.COPYING, EngineState.PAUSED, EngineState.RESUMING])
+        self.src_drop.setEnabled(state == EngineState.IDLE); self.dst_drop.setEnabled(state == EngineState.IDLE)
+        if state == EngineState.COPYING: self.graph.reset(); self.pulse_anim.start(); self.reset_action_buttons()
+        elif state == EngineState.IDLE: self.pulse_anim.stop(); self.speed_shadow.setBlurRadius(20)
 
     @Slot()
     def on_job_finished(self):
-        if self.engine.state != EngineState.STOPPING:
-            self.prog_anim.setEndValue(100)
-            self.prog_anim.start()
-            self.lbl_speed.setText("Done")
-            self.lbl_eta.setText(f"{self.current_operation.name} Complete")
-            self.log_message(f"<span style='color:#00F3FF;'>Operation {self.current_operation.name} finished flawlessly.</span>")
-            self.crossfade_main_buttons(show_open=True)
+        if self.engine.state != EngineState.STOPPING: self.prog_anim.setEndValue(100); self.prog_anim.start(); self.lbl_speed.setText("Done"); self.log_message(f"<span style='color:#00F3FF;'>Operation {self.current_operation.name} finished.</span>"); self.crossfade_main_buttons(show_open=True)
 
     def crossfade_main_buttons(self, show_open):
         self.main_btn_anim = QParallelAnimationGroup()
-        a1 = QPropertyAnimation(self.eff_start, b"opacity")
-        a1.setDuration(400); a1.setEndValue(0.0 if show_open else 1.0)
-        a2 = QPropertyAnimation(self.eff_open, b"opacity")
-        a2.setDuration(400); a2.setEndValue(1.0 if show_open else 0.0)
+        a1 = QPropertyAnimation(self.eff_start, b"opacity"); a1.setDuration(400); a1.setEndValue(0.0 if show_open else 1.0)
+        a2 = QPropertyAnimation(self.eff_open, b"opacity"); a2.setDuration(400); a2.setEndValue(1.0 if show_open else 0.0)
         self.main_btn_anim.addAnimation(a1); self.main_btn_anim.addAnimation(a2); self.main_btn_anim.start()
-        self.btn_start.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, show_open)
-        self.btn_open_dest.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not show_open)
+        self.btn_start.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, show_open); self.btn_open_dest.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not show_open)
 
     def reset_action_buttons(self):
         if self.eff_start.opacity() < 1.0: self.crossfade_main_buttons(show_open=False)
@@ -1016,36 +752,22 @@ class MainWindow(QMainWindow):
             if sys.platform == 'win32': os.startfile(path)
             elif sys.platform == 'darwin': subprocess.Popen(['open', path])
             else: subprocess.Popen(['xdg-open', path])
-        except Exception as e: self.log_message(f"<span style='color:#FF453A;'>Could not open: {e}</span>")
+        except Exception as e: self.log_message(f"Could not open: {e}")
 
     def start_transfer(self):
-        if not self.src_path or not self.dst_path: return QMessageBox.warning(self, "Selection Required", "Select Source and Destination paths.")
-        if os.path.abspath(self.src_path) == os.path.abspath(self.dst_path): return QMessageBox.warning(self, "Invalid Trajectory", "Source and Destination cannot match.")
-        
+        if not self.src_path or not self.dst_path: return QMessageBox.warning(self, "Selection", "Select paths.")
+        if os.path.abspath(self.src_path) == os.path.abspath(self.dst_path): return QMessageBox.warning(self, "Invalid", "Paths cannot match.")
         mode = next(m for m in TransferMode if m.value == self.mode_combo.currentText())
-        self.log_message(f"Initiating Engine: [MODE: {mode.name}] [OP: {self.current_operation.name}]")
-        self.progress_bar.setValue(0)
-        self.engine.prepare_job(self.src_path, self.dst_path, mode, self.current_operation, 16)
-        self.engine.start()
+        self.progress_bar.setValue(0); self.engine.prepare_job(self.src_path, self.dst_path, mode, self.current_operation, 16); self.engine.start()
 
     def stop_transfer(self):
-        if QMessageBox.question(self, "Cancel Transfer", "Abort and delete partial files?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            self.log_message("<span style='color:#FF453A;'>Aborting transfer and cleaning up...</span>")
-            self.engine.set_state(EngineState.STOPPING)
+        if QMessageBox.question(self, "Cancel", "Abort?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes: self.engine.set_state(EngineState.STOPPING)
 
 def main():
     app = QApplication(sys.argv)
-    
-    # Force global application icon
     logo_path = resource_path("logo.ico")
-    if logo_path:
-        app.setWindowIcon(QIcon(logo_path))
-        
-    font = QFont(); font.setFamilies(['SF Pro Text', '-apple-system', 'Segoe UI']); font.setPointSize(10)
-    app.setFont(font)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    if os.path.exists(logo_path): app.setWindowIcon(QIcon(logo_path))
+    window = MainWindow(); window.show(); sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
